@@ -1,13 +1,20 @@
-basePath: /v1
+basePath: /api/v1
 definitions:
-  github_com_KOFI-GYIMAH_github-monitor_internal_models.AuthorCommitCount:
+  handler.AddRepositoryRequest:
+    properties:
+      name:
+        type: string
+      owner:
+        type: string
+    type: object
+  models.AuthorCommitCount:
     properties:
       author_name:
         type: string
       commit_count:
         type: integer
     type: object
-  github_com_KOFI-GYIMAH_github-monitor_internal_models.Commit:
+  models.Commit:
     properties:
       author_date:
         type: string
@@ -26,12 +33,12 @@ definitions:
       sha:
         type: string
     type: object
-  github_com_KOFI-GYIMAH_github-monitor_internal_models.DateRequest:
+  models.DateRequest:
     properties:
       since:
         type: string
     type: object
-  github_com_KOFI-GYIMAH_github-monitor_internal_models.Repository:
+  models.Repository:
     properties:
       created_at:
         type: string
@@ -61,10 +68,47 @@ definitions:
 host: localhost:8081
 info:
   contact: {}
-  description: This is a sample server.
+  description: A Go service that monitors GitHub repositories, tracks commits, and
+    stores data in a persistent database.
   title: GitHub Monitory Service
   version: 1.0.0
 paths:
+  /repositories:
+    post:
+      consumes:
+      - application/json
+      description: Adds a new GitHub repository to be monitored
+      parameters:
+      - description: Repository to Add
+        in: body
+        name: repository
+        required: true
+        schema:
+          $ref: '#/definitions/handler.AddRepositoryRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Invalid request
+          schema:
+            type: string
+        "409":
+          description: Repository already monitored
+          schema:
+            type: string
+        "500":
+          description: Failed to sync repository
+          schema:
+            type: string
+      summary: Add a repository to monitor
+      tags:
+      - repositories
   /repositories/{owner}/{name}/commits:
     get:
       description: List commits for a repository (supports filtering & pagination)
@@ -104,7 +148,7 @@ paths:
           description: OK
           schema:
             items:
-              $ref: '#/definitions/github_com_KOFI-GYIMAH_github-monitor_internal_models.Commit'
+              $ref: '#/definitions/models.Commit'
             type: array
         "500":
           description: Internal Server Error
@@ -134,7 +178,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/github_com_KOFI-GYIMAH_github-monitor_internal_models.DateRequest'
+          $ref: '#/definitions/models.DateRequest'
       produces:
       - application/json
       responses:
@@ -177,7 +221,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/github_com_KOFI-GYIMAH_github-monitor_internal_models.DateRequest'
+          $ref: '#/definitions/models.DateRequest'
       produces:
       - application/json
       responses:
@@ -224,7 +268,7 @@ paths:
           description: OK
           schema:
             items:
-              $ref: '#/definitions/github_com_KOFI-GYIMAH_github-monitor_internal_models.AuthorCommitCount'
+              $ref: '#/definitions/models.AuthorCommitCount'
             type: array
         "500":
           description: Internal Server Error
@@ -253,7 +297,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/github_com_KOFI-GYIMAH_github-monitor_internal_models.Repository'
+            $ref: '#/definitions/models.Repository'
         "500":
           description: Internal Server Error
           schema:

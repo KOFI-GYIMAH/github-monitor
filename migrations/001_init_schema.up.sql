@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS commits (
     CONSTRAINT unique_commit_per_repo UNIQUE (sha, repository_id)
 );
 
+
 CREATE INDEX IF NOT EXISTS idx_commits_repository_id ON commits(repository_id);
 CREATE INDEX IF NOT EXISTS idx_commits_author_date ON commits(author_date);
 CREATE INDEX IF NOT EXISTS idx_commits_author_name ON commits(author_name);

@@ -38,21 +38,18 @@ var log = &Logger{
 	formatter: defaultFormatter,
 }
 
-// Public API (simple direct calls)
-func Debug(msg string, args ...interface{}) { log.log(LevelDebug, msg, args...) }
-func Info(msg string, args ...interface{})  { log.log(LevelInfo, msg, args...) }
-func Warn(msg string, args ...interface{})  { log.log(LevelWarn, msg, args...) }
-func Error(msg string, args ...interface{}) { log.log(LevelError, msg, args...) }
-func Fatal(msg string, args ...interface{}) { log.log(LevelFatal, msg, args...); os.Exit(1) }
+func Debug(msg string, args ...any) { log.log(LevelDebug, msg, args...) }
+func Info(msg string, args ...any)  { log.log(LevelInfo, msg, args...) }
+func Warn(msg string, args ...any)  { log.log(LevelWarn, msg, args...) }
+func Error(msg string, args ...any) { log.log(LevelError, msg, args...) }
+func Fatal(msg string, args ...any) { log.log(LevelFatal, msg, args...); os.Exit(1) }
 
-// Configuration functions
 func SetLevel(level LogLevel)                       { log.level = level }
 func SetOutput(out io.Writer)                       { log.out = out }
 func SetColor(enabled bool)                         { log.color = enabled }
 func SetFormatter(fn func(LogLevel, string) string) { log.formatter = fn }
 
-// Internal implementation
-func (l *Logger) log(level LogLevel, msg string, args ...interface{}) {
+func (l *Logger) log(level LogLevel, msg string, args ...any) {
 	if level < l.level {
 		return
 	}

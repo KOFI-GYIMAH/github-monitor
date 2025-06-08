@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KOFI-GYIMAH/github-monitor/pkg/errors"
 	"github.com/KOFI-GYIMAH/github-monitor/pkg/logger"
 )
 
@@ -25,8 +26,15 @@ type Client struct {
 }
 
 func NewClient(token string) *Client {
+	rl := NewRateLimiter()
+
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: rl.Middleware(http.DefaultTransport),
+	}
+
 	return &Client{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: client,
 		token:      token,
 	}
 }
@@ -34,7 +42,7 @@ func NewClient(token string) *Client {
 func (c *Client) makeRequest(ctx context.Context, method, path string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
 	if c.token != "" {
@@ -42,66 +50,69 @@ func (c *Client) makeRequest(ctx context.Context, method, path string) (*http.Re
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
-	return c.httpClient.Do(req)
-}
-
-type Repository struct {
-	FullName        string    `json:"full_name"`
-	Description     string    `json:"description"`
-	HTMLURL         string    `json:"html_url"`
-	Language        string    `json:"language"`
-	ForksCount      int       `json:"forks_count"`
-	StargazersCount int       `json:"stargazers_count"`
-	OpenIssuesCount int       `json:"open_issues_count"`
-	WatchersCount   int       `json:"watchers_count"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-}
-
-type Commit struct {
-	SHA     string `json:"sha"`
-	HTMLURL string `json:"html_url"`
-	Commit  struct {
-		Message string `json:"message"`
-		Author  struct {
-			Name  string    `json:"name"`
-			Email string    `json:"email"`
-			Date  time.Time `json:"date"`
-		} `json:"author"`
-	} `json:"commit"`
-	Author struct {
-		Login string `json:"login"`
-	} `json:"author"`
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute HTTP request: %w", err)
+	}
+	return resp, nil
 }
 
 func (c *Client) GetRepository(ctx context.Context, owner, repo string) (*Repository, error) {
 	resp, err := c.makeRequest(ctx, "GET", fmt.Sprintf("/repos/%s/%s", owner, repo))
 	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %w", err)
+		return nil, errors.New(
+			"GITHUB_API_ERROR",
+			"Failed to fetch repository from GitHub",
+			fmt.Sprintf("Could not retrieve repository %s/%s from GitHub API", owner, repo),
+			err,
+			errors.LevelError,
+		)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errors.New(
+			"REPOSITORY_NOT_FOUND",
+			"Repository not found on GitHub",
+			fmt.Sprintf("The repository %s/%s does not exist or you don't have access to it", owner, repo),
+			nil,
+			errors.LevelInfo,
+		)
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, errors.New(
+			"GITHUB_API_ERROR",
+			"Unexpected response from GitHub API",
+			fmt.Sprintf("GitHub API returned status %d when fetching repository %s/%s", resp.StatusCode, owner, repo),
+			nil,
+			errors.LevelError,
+		)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, errors.New(
+			"GITHUB_API_ERROR",
+			"Failed to read GitHub API response",
+			"Could not read the response body from GitHub API",
+			err,
+			errors.LevelError,
+		)
 	}
 
 	var repository Repository
 	if err := json.Unmarshal(body, &repository); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal repository: %w", err)
+		return nil, errors.New(
+			"GITHUB_API_ERROR",
+			"Failed to parse GitHub API response",
+			"Could not understand the response from GitHub API",
+			err,
+			errors.LevelError,
+		)
 	}
 
 	return &repository, nil
-}
-
-type CommitListOptions struct {
-	Since   time.Time
-	Page    int
-	PerPage int
 }
 
 func (c *Client) ListCommits(ctx context.Context, owner, repo string, opts CommitListOptions) ([]*Commit, error) {
@@ -128,22 +139,46 @@ func (c *Client) fetchSinglePage(ctx context.Context, path string, queryParams u
 
 	resp, err := c.makeRequest(ctx, "GET", path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %w", err)
+		return nil, errors.New(
+			"GITHUB_API_ERROR",
+			"Failed to fetch commits from GitHub",
+			"Could not connect to GitHub API to retrieve commits",
+			err,
+			errors.LevelError,
+		)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, errors.New(
+			"GITHUB_API_ERROR",
+			"Failed to fetch commits from GitHub",
+			fmt.Sprintf("GitHub API returned unexpected status code %d when fetching commits", resp.StatusCode),
+			nil,
+			errors.LevelError,
+		)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, errors.New(
+			"GITHUB_API_ERROR",
+			"Failed to read commits from GitHub",
+			"Could not read the response body containing commits from GitHub API",
+			err,
+			errors.LevelError,
+		)
 	}
 
 	var commits []*Commit
 	if err := json.Unmarshal(body, &commits); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal commits: %w", err)
+		return nil, errors.New(
+			"GITHUB_API_ERROR",
+			"Failed to parse commits from GitHub",
+			"Could not understand the commits data returned by GitHub API",
+			err,
+			errors.LevelError,
+		)
 	}
 
 	return commits, nil
@@ -163,22 +198,46 @@ func (c *Client) fetchAllPages(ctx context.Context, path string, queryParams url
 
 		resp, err := c.makeRequest(ctx, "GET", currentPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to make request for page %d: %w", page, err)
+			return nil, errors.New(
+				"GITHUB_API_ERROR",
+				"Failed to fetch commits from GitHub",
+				fmt.Sprintf("Could not connect to GitHub API to retrieve page %d of commits", page),
+				err,
+				errors.LevelError,
+			)
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("unexpected status code for page %d: %d", page, resp.StatusCode)
+			return nil, errors.New(
+				"GITHUB_API_ERROR",
+				"Failed to fetch commits from GitHub",
+				fmt.Sprintf("GitHub API returned unexpected status code %d when fetching page %d of commits", resp.StatusCode, page),
+				nil,
+				errors.LevelError,
+			)
 		}
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read response body for page %d: %w", page, err)
+			return nil, errors.New(
+				"GITHUB_API_ERROR",
+				"Failed to read commits from GitHub",
+				fmt.Sprintf("Could not read the response body for page %d of commits", page),
+				err,
+				errors.LevelError,
+			)
 		}
 
 		var commits []*Commit
 		if err := json.Unmarshal(body, &commits); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal commits for page %d: %w", page, err)
+			return nil, errors.New(
+				"GITHUB_API_ERROR",
+				"Failed to parse commits from GitHub",
+				fmt.Sprintf("Could not understand the commits data for page %d returned by GitHub API", page),
+				err,
+				errors.LevelError,
+			)
 		}
 
 		if len(commits) == 0 {
@@ -192,11 +251,8 @@ func (c *Client) fetchAllPages(ctx context.Context, path string, queryParams url
 		if !strings.Contains(linkHeader, `rel="next"`) {
 			break
 		}
-
-		logger.Info("Fetched page %d", page)
 	}
 
-	logger.Info("Fetched %d commits", len(allCommits))
-
+	logger.Info("Successfully fetched %d commits from GitHub", len(allCommits))
 	return allCommits, nil
 }

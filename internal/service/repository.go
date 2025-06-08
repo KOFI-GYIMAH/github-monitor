@@ -11,12 +11,17 @@ import (
 	"github.com/KOFI-GYIMAH/github-monitor/pkg/logger"
 )
 
+type GitHubClientInterface interface {
+	GetRepository(ctx context.Context, owner, name string) (*github.Repository, error)
+	ListCommits(ctx context.Context, owner, name string, opts github.CommitListOptions) ([]*github.Commit, error)
+}
+
 type RepositoryService struct {
-	githubClient *github.Client
+	githubClient GitHubClientInterface
 	db           models.Database
 }
 
-func NewRepositoryService(githubClient *github.Client, db models.Database) *RepositoryService {
+func NewRepositoryService(githubClient GitHubClientInterface, db models.Database) *RepositoryService {
 	return &RepositoryService{
 		githubClient: githubClient,
 		db:           db,
@@ -28,14 +33,15 @@ func (s *RepositoryService) GetRepository(ctx context.Context, name string) (*mo
 }
 
 func (s *RepositoryService) SyncRepository(ctx context.Context, owner, name string, since time.Time) error {
-	logger.Info("Syncing repository...")
+	logger.Info("Syncing repository... %s", name)
+
 	return s.db.WithTransaction(ctx, func(tx *sql.Tx) error {
 		repo, err := s.githubClient.GetRepository(ctx, owner, name)
 		if err != nil {
-			return fmt.Errorf("failed to get repository: %w", err)
+			return err
 		}
 
-		logger.Info("Successfully synced repository %s", repo.FullName)
+		logger.Info("Successfully fetched repository %s", repo.FullName)
 
 		// * Save repository metadata
 		dbRepo := models.Repository{
@@ -53,7 +59,7 @@ func (s *RepositoryService) SyncRepository(ctx context.Context, owner, name stri
 
 		err = s.db.UpsertRepositoryTx(ctx, tx, &dbRepo)
 		if err != nil {
-			return fmt.Errorf("failed to save repository: %w", err)
+			return err
 		}
 
 		logger.Info("Successfully saved repository %s", repo.FullName)
@@ -62,10 +68,10 @@ func (s *RepositoryService) SyncRepository(ctx context.Context, owner, name stri
 		commitOpts := github.CommitListOptions{Since: since}
 		commits, err := s.githubClient.ListCommits(ctx, owner, name, commitOpts)
 		if err != nil {
-			return fmt.Errorf("failed to list commits: %w", err)
+			return fmt.Errorf("failed to list commits for %s: %w", repo.FullName, err)
 		}
 
-		logger.Info("Successfully fetched %d commits", len(commits))
+		logger.Info("Successfully fetched %d commits for %s", len(commits), repo.FullName)
 
 		// * Save commits
 		for _, commit := range commits {
@@ -83,18 +89,23 @@ func (s *RepositoryService) SyncRepository(ctx context.Context, owner, name stri
 
 			err = s.db.InsertCommitTx(ctx, tx, &dbCommit)
 			if err != nil {
-				return fmt.Errorf("failed to insert commit: %w", err)
+				return fmt.Errorf("failed to insert commit for %s: %w", repo.FullName, err)
 			}
 
-			logger.Info("Successfully saved commit %s", commit.SHA)
+			logger.Info("Successfully saved commit %s for %s", commit.SHA, repo.FullName)
 		}
 
-		logger.Info("Successfully synced repository %s", repo.FullName)
+		logger.Info("Successfully synced repository %s with %d commits", repo.FullName, len(commits))
+
 		// * Update last sync time
 		now := time.Now()
 		dbRepo.LastCommitFetchedAt = &now
 		return s.db.UpdateRepositoryTx(ctx, tx, &dbRepo)
 	})
+}
+
+func (s *RepositoryService) ListAllRepositories(ctx context.Context) ([]*models.Repository, error) {
+	return s.db.GetAllRepositories(ctx)
 }
 
 func (s *RepositoryService) GetTopAuthors(ctx context.Context, repoName string, limit int) ([]models.AuthorCommitCount, error) {

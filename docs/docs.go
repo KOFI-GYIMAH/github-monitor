@@ -15,6 +15,61 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/repositories": {
+            "post": {
+                "description": "Adds a new GitHub repository to be monitored",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "repositories"
+                ],
+                "summary": "Add a repository to monitor",
+                "parameters": [
+                    {
+                        "description": "Repository to Add",
+                        "name": "repository",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handler.AddRepositoryRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid request",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "409": {
+                        "description": "Repository already monitored",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "500": {
+                        "description": "Failed to sync repository",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/repositories/{owner}/{name}/commits": {
             "get": {
                 "description": "List commits for a repository (supports filtering \u0026 pagination)",
@@ -73,7 +128,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/github_com_KOFI-GYIMAH_github-monitor_internal_models.Commit"
+                                "$ref": "#/definitions/models.Commit"
                             }
                         }
                     },
@@ -120,7 +175,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_KOFI-GYIMAH_github-monitor_internal_models.DateRequest"
+                            "$ref": "#/definitions/models.DateRequest"
                         }
                     }
                 ],
@@ -183,7 +238,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_KOFI-GYIMAH_github-monitor_internal_models.DateRequest"
+                            "$ref": "#/definitions/models.DateRequest"
                         }
                     }
                 ],
@@ -251,7 +306,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/github_com_KOFI-GYIMAH_github-monitor_internal_models.AuthorCommitCount"
+                                "$ref": "#/definitions/models.AuthorCommitCount"
                             }
                         }
                     },
@@ -294,7 +349,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/github_com_KOFI-GYIMAH_github-monitor_internal_models.Repository"
+                            "$ref": "#/definitions/models.Repository"
                         }
                     },
                     "500": {
@@ -308,7 +363,18 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "github_com_KOFI-GYIMAH_github-monitor_internal_models.AuthorCommitCount": {
+        "handler.AddRepositoryRequest": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "owner": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.AuthorCommitCount": {
             "type": "object",
             "properties": {
                 "author_name": {
@@ -319,7 +385,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_KOFI-GYIMAH_github-monitor_internal_models.Commit": {
+        "models.Commit": {
             "type": "object",
             "properties": {
                 "author_date": {
@@ -348,7 +414,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_KOFI-GYIMAH_github-monitor_internal_models.DateRequest": {
+        "models.DateRequest": {
             "type": "object",
             "properties": {
                 "since": {
@@ -356,7 +422,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_KOFI-GYIMAH_github-monitor_internal_models.Repository": {
+        "models.Repository": {
             "type": "object",
             "properties": {
                 "created_at": {
@@ -404,10 +470,10 @@ const docTemplate = `{
 var SwaggerInfo = &swag.Spec{
 	Version:          "1.0.0",
 	Host:             "localhost:8081",
-	BasePath:         "/v1",
+	BasePath:         "/api/v1",
 	Schemes:          []string{},
 	Title:            "GitHub Monitory Service",
-	Description:      "This is a sample server.",
+	Description:      "A Go service that monitors GitHub repositories, tracks commits, and stores data in a persistent database.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 	LeftDelim:        "{{",

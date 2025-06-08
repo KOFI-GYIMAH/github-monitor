@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/KOFI-GYIMAH/github-monitor/internal/models"
+	"github.com/KOFI-GYIMAH/github-monitor/pkg/errors"
 	"github.com/KOFI-GYIMAH/github-monitor/pkg/logger"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -21,7 +22,13 @@ type PostgresDB struct {
 func NewPostgresDB(url string) (*PostgresDB, error) {
 	db, err := sql.Open("postgres", url)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, errors.New(
+			"DB_CONNECTION_ERROR",
+			"Failed to open database connection",
+			"Could not initialize database connection",
+			err,
+			errors.LevelError,
+		)
 	}
 
 	// * Configure connection pool
@@ -31,7 +38,13 @@ func NewPostgresDB(url string) (*PostgresDB, error) {
 
 	// * Verify connection
 	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("failed to ping database: %w", err)
+		return nil, errors.New(
+			"DB_CONNECTION_ERROR",
+			"Failed to verify database connection",
+			"Database ping failed",
+			err,
+			errors.LevelError,
+		)
 	}
 
 	logger.Info("connected to database successfully 🎉")
@@ -41,31 +54,64 @@ func NewPostgresDB(url string) (*PostgresDB, error) {
 func (p *PostgresDB) Migrate() error {
 	driver, err := postgres.WithInstance(p.db, &postgres.Config{})
 	if err != nil {
-		return fmt.Errorf("failed to create migrate driver: %w", err)
+		return errors.New(
+			"DB_MIGRATION_ERROR",
+			"Failed to create migration driver",
+			"Could not initialize migration driver instance",
+			err,
+			errors.LevelError,
+		)
 	}
 
 	m, err := migrate.NewWithDatabaseInstance(
 		"file://migrations",
 		"postgres", driver)
 	if err != nil {
-		return fmt.Errorf("failed to create migrate instance: %w", err)
+		return errors.New(
+			"DB_MIGRATION_ERROR",
+			"Failed to create migration instance",
+			"Could not create migration instance with database",
+			err,
+			errors.LevelError,
+		)
 	}
 
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return fmt.Errorf("failed to run migrations: %w", err)
+		return errors.New(
+			"DB_MIGRATION_ERROR",
+			"Failed to run migrations",
+			"Migration up operation failed",
+			err,
+			errors.LevelError,
+		)
 	}
 
 	return nil
 }
 
 func (p *PostgresDB) Close() error {
-	return p.db.Close()
+	if err := p.db.Close(); err != nil {
+		return errors.New(
+			"DB_CONNECTION_ERROR",
+			"Failed to close database connection",
+			"Error while closing database connection",
+			err,
+			errors.LevelWarning,
+		)
+	}
+	return nil
 }
 
 func (p *PostgresDB) WithTransaction(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return errors.New(
+			"DB_TRANSACTION_ERROR",
+			"Failed to begin transaction",
+			"Could not start database transaction",
+			err,
+			errors.LevelError,
+		)
 	}
 
 	defer func() {
@@ -77,12 +123,28 @@ func (p *PostgresDB) WithTransaction(ctx context.Context, fn func(tx *sql.Tx) er
 
 	if err := fn(tx); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
-			return fmt.Errorf("transaction error: %v, rollback error: %w", err, rbErr)
+			return errors.New(
+				"DB_TRANSACTION_ERROR",
+				"Transaction failed and rollback encountered error",
+				"Transaction error with additional rollback failure",
+				fmt.Errorf("transaction error: %v, rollback error: %w", err, rbErr),
+				errors.LevelError,
+			)
 		}
 		return err
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return errors.New(
+			"DB_TRANSACTION_ERROR",
+			"Failed to commit transaction",
+			"Error while committing transaction",
+			err,
+			errors.LevelError,
+		)
+	}
+
+	return nil
 }
 
 func (p *PostgresDB) UpsertRepository(ctx context.Context, repo *models.Repository) error {
@@ -112,7 +174,13 @@ func (p *PostgresDB) UpsertRepository(ctx context.Context, repo *models.Reposito
 	var lastFetched sql.NullTime
 	err := row.Scan(&repo.ID, &lastFetched)
 	if err != nil {
-		return fmt.Errorf("failed to upsert repository: %w", err)
+		return errors.New(
+			"DB_REPOSITORY_ERROR",
+			"Failed to upsert repository",
+			fmt.Sprintf("Could not upsert repository '%s'", repo.Name),
+			err,
+			errors.LevelError,
+		)
 	}
 
 	if lastFetched.Valid {
@@ -143,9 +211,21 @@ func (p *PostgresDB) GetRepository(ctx context.Context, name string) (*models.Re
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, nil
+			return nil, errors.New(
+				"DB_REPOSITORY_NOT_FOUND",
+				"Repository not found",
+				fmt.Sprintf("Repository '%s' does not exist", name),
+				err,
+				errors.LevelInfo,
+			)
 		}
-		return nil, fmt.Errorf("failed to get repository: %w", err)
+		return nil, errors.New(
+			"DB_REPOSITORY_ERROR",
+			"Failed to fetch repository",
+			fmt.Sprintf("Could not fetch repository '%s'", name),
+			err,
+			errors.LevelError,
+		)
 	}
 
 	if lastFetched.Valid {
@@ -153,6 +233,30 @@ func (p *PostgresDB) GetRepository(ctx context.Context, name string) (*models.Re
 	}
 
 	return &repo, nil
+}
+
+func (s *PostgresDB) GetAllRepositories(ctx context.Context) ([]*models.Repository, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM repositories`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var repos []*models.Repository
+	for rows.Next() {
+		var r models.Repository
+		if err := rows.Scan(&r.Name); err != nil {
+			return nil, errors.New(
+				"DB_REPOSITORY_ERROR",
+				"Failed to fetch repository",
+				fmt.Sprintf("Could not fetch repository '%s'", r.Name),
+				err,
+				errors.LevelError)
+		}
+		repos = append(repos, &r)
+	}
+
+	return repos, nil
 }
 
 func (p *PostgresDB) UpdateRepository(ctx context.Context, repo *models.Repository) error {
@@ -164,7 +268,13 @@ func (p *PostgresDB) UpdateRepository(ctx context.Context, repo *models.Reposito
 
 	_, err := p.db.ExecContext(ctx, query, repo.LastCommitFetchedAt, repo.ID)
 	if err != nil {
-		return fmt.Errorf("failed to update repository: %w", err)
+		return errors.New(
+			"DB_REPOSITORY_ERROR",
+			"Failed to update repository",
+			fmt.Sprintf("Could not update repository '%d'", repo.ID),
+			err,
+			errors.LevelError,
+		)
 	}
 
 	return nil
@@ -184,7 +294,13 @@ func (p *PostgresDB) InsertCommit(ctx context.Context, commit *models.Commit) er
 	)
 
 	if err != nil {
-		return fmt.Errorf("failed to insert commit: %w", err)
+		return errors.New(
+			"DB_COMMIT_ERROR",
+			"Failed to insert commit",
+			fmt.Sprintf("Could not insert commit '%s' for repository '%d'", commit.SHA, commit.RepositoryID),
+			err,
+			errors.LevelError,
+		)
 	}
 
 	return nil
@@ -199,7 +315,7 @@ func (p *PostgresDB) GetCommits(ctx context.Context, repoName string, since, unt
 		WHERE r.name = $1
 	`
 
-	args := []interface{}{repoName}
+	args := []any{repoName}
 	paramCount := 1
 
 	if since != nil {
@@ -218,7 +334,13 @@ func (p *PostgresDB) GetCommits(ctx context.Context, repoName string, since, unt
 
 	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query commits: %w", err)
+		return nil, errors.New(
+			"DB_COMMIT_ERROR",
+			"Failed to query commits",
+			fmt.Sprintf("Could not fetch commits for repository '%s'", repoName),
+			err,
+			errors.LevelError,
+		)
 	}
 	defer rows.Close()
 
@@ -230,13 +352,25 @@ func (p *PostgresDB) GetCommits(ctx context.Context, repoName string, since, unt
 			&c.AuthorEmail, &c.AuthorDate, &c.CommitURL,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan commit: %w", err)
+			return nil, errors.New(
+				"DB_COMMIT_ERROR",
+				"Failed to scan commit",
+				"Error while scanning commit row",
+				err,
+				errors.LevelError,
+			)
 		}
 		commits = append(commits, c)
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows error: %w", err)
+		return nil, errors.New(
+			"DB_COMMIT_ERROR",
+			"Failed to process commits",
+			"Error while processing commit rows",
+			err,
+			errors.LevelError,
+		)
 	}
 
 	return commits, nil
@@ -255,7 +389,13 @@ func (p *PostgresDB) GetTopAuthors(ctx context.Context, repoName string, limit i
 
 	rows, err := p.db.QueryContext(ctx, query, repoName, limit)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query top authors: %w", err)
+		return nil, errors.New(
+			"DB_AUTHOR_ERROR",
+			"Failed to query top authors",
+			fmt.Sprintf("Could not fetch top authors for repository '%s'", repoName),
+			err,
+			errors.LevelError,
+		)
 	}
 	defer rows.Close()
 
@@ -264,20 +404,31 @@ func (p *PostgresDB) GetTopAuthors(ctx context.Context, repoName string, limit i
 		var acc models.AuthorCommitCount
 		err := rows.Scan(&acc.AuthorName, &acc.CommitCount)
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan author commit count: %w", err)
+			return nil, errors.New(
+				"DB_AUTHOR_ERROR",
+				"Failed to scan author commit count",
+				"Error while scanning author commit count row",
+				err,
+				errors.LevelError,
+			)
 		}
 		results = append(results, acc)
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows error: %w", err)
+		return nil, errors.New(
+			"DB_AUTHOR_ERROR",
+			"Failed to process top authors",
+			"Error while processing author rows",
+			err,
+			errors.LevelError,
+		)
 	}
 
 	return results, nil
 }
 
 func (p *PostgresDB) ResetRepository(ctx context.Context, repoName string, since time.Time) error {
-	// * Delete all commits for the repository
 	_, err := p.db.ExecContext(ctx, `
 		DELETE FROM commits 
 		WHERE repository_id = (
@@ -285,23 +436,34 @@ func (p *PostgresDB) ResetRepository(ctx context.Context, repoName string, since
 		)
 	`, repoName)
 	if err != nil {
-		return fmt.Errorf("failed to delete commits: %w", err)
+		return errors.New(
+			"DB_RESET_ERROR",
+			"Failed to delete commits",
+			fmt.Sprintf("Could not delete commits for repository '%s'", repoName),
+			err,
+			errors.LevelError,
+		)
 	}
 
-	// * update the last fetched time
 	_, err = p.db.ExecContext(ctx, `
 		UPDATE repositories 
 		SET last_commit_fetched_at = $1 
 		WHERE name = $2
 	`, since, repoName)
 	if err != nil {
-		return fmt.Errorf("failed to update repository: %w", err)
+		return errors.New(
+			"DB_RESET_ERROR",
+			"Failed to update repository",
+			fmt.Sprintf("Could not update last fetched time for repository '%s'", repoName),
+			err,
+			errors.LevelError,
+		)
 	}
 
 	return nil
 }
 
-// Transaction versions of methods for use with WithTransaction
+// * Transaction versions of methods for use with WithTransaction
 func (p *PostgresDB) UpsertRepositoryTx(ctx context.Context, tx *sql.Tx, repo *models.Repository) error {
 	query := `
 		INSERT INTO repositories (
@@ -329,7 +491,13 @@ func (p *PostgresDB) UpsertRepositoryTx(ctx context.Context, tx *sql.Tx, repo *m
 	var lastFetched sql.NullTime
 	err := row.Scan(&repo.ID, &lastFetched)
 	if err != nil {
-		return fmt.Errorf("failed to upsert repository: %w", err)
+		return errors.New(
+			"DB_REPOSITORY_ERROR",
+			"Failed to upsert repository in transaction",
+			fmt.Sprintf("Could not upsert repository '%s' in transaction", repo.Name),
+			err,
+			errors.LevelError,
+		)
 	}
 
 	if lastFetched.Valid {
@@ -353,7 +521,13 @@ func (p *PostgresDB) InsertCommitTx(ctx context.Context, tx *sql.Tx, commit *mod
 	)
 
 	if err != nil {
-		return fmt.Errorf("failed to insert commit: %w", err)
+		return errors.New(
+			"DB_COMMIT_ERROR",
+			"Failed to insert commit in transaction",
+			fmt.Sprintf("Could not insert commit '%s' in transaction", commit.SHA),
+			err,
+			errors.LevelError,
+		)
 	}
 
 	return nil
@@ -368,7 +542,13 @@ func (p *PostgresDB) UpdateRepositoryTx(ctx context.Context, tx *sql.Tx, repo *m
 
 	_, err := tx.ExecContext(ctx, query, repo.LastCommitFetchedAt, repo.ID)
 	if err != nil {
-		return fmt.Errorf("failed to update repository: %w", err)
+		return errors.New(
+			"DB_REPOSITORY_ERROR",
+			"Failed to update repository in transaction",
+			fmt.Sprintf("Could not update repository '%d' in transaction", repo.ID),
+			err,
+			errors.LevelError,
+		)
 	}
 
 	return nil

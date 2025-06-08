@@ -1,32 +1,53 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
 	"github.com/KOFI-GYIMAH/github-monitor/internal/models"
 	"github.com/KOFI-GYIMAH/github-monitor/internal/service"
+	"github.com/KOFI-GYIMAH/github-monitor/internal/worker"
+	"github.com/KOFI-GYIMAH/github-monitor/pkg/errors"
+	"github.com/KOFI-GYIMAH/github-monitor/pkg/logger"
 	"github.com/gorilla/mux"
 )
 
 type RepositoryHandler struct {
 	service *service.RepositoryService
+	ctx     context.Context
 }
 
-func NewRepositoryHandler(service *service.RepositoryService) *RepositoryHandler {
+func NewRepositoryHandler(ctx context.Context, service *service.RepositoryService) *RepositoryHandler {
 	return &RepositoryHandler{
 		service: service,
+		ctx:     ctx,
 	}
 }
 
 func (h *RepositoryHandler) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/repositories/{owner}/{repo}", h.getRepository).Methods("GET")
+	r.HandleFunc("/repositories", h.AddRepository).Methods("POST")
 	r.HandleFunc("/repositories/{owner}/{name}/commits", h.getCommits).Methods("GET")
 	r.HandleFunc("/repositories/{owner}/{name}/top-authors", h.getTopCommitAuthors).Methods("GET")
 	r.HandleFunc("/repositories/{owner}/{name}/reset-collection", h.resetCollection).Methods("POST")
 	r.HandleFunc("/repositories/{owner}/{name}/monitor", h.monitorRepository).Methods("POST")
+}
+
+func writeSuccess(w http.ResponseWriter, data interface{}, message ...string) {
+	resp := APIResponse{
+		Status: "success",
+		Data:   data,
+	}
+	if len(message) > 0 {
+		resp.Message = message[0]
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 // getRepository godoc
@@ -47,12 +68,67 @@ func (h *RepositoryHandler) getRepository(w http.ResponseWriter, r *http.Request
 	fullName := owner + "/" + repoName
 	repository, err := h.service.GetRepository(r.Context(), fullName)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		errors.WriteHTTPError(w, err)
 		return
 	}
 
+	logger.Info("Fetched repository %s", fullName)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(repository)
+	writeSuccess(w, repository, "Successfully fetched repository")
+}
+
+// @Summary Add a repository to monitor
+// @Description Adds a new GitHub repository to be monitored
+// @Tags Repository
+// @Accept json
+// @Produce json
+// @Param repository body AddRepositoryRequest true "Repository to Add"
+// @Success 201 {object} map[string]string
+// @Failure 400 {string} string "Invalid request"
+// @Failure 409 {string} string "Repository already monitored"
+// @Failure 500 {string} string "Failed to sync repository"
+// @Router /repositories [post]
+func (h *RepositoryHandler) AddRepository(w http.ResponseWriter, r *http.Request) {
+	var req AddRepositoryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	repoName := fmt.Sprintf("%s/%s", req.Owner, req.Name)
+
+	// * Check if repo already exists
+	existingRepos, err := h.service.ListAllRepositories(ctx)
+	if err != nil {
+		errors.WriteHTTPError(w, err)
+		return
+	}
+	for _, r := range existingRepos {
+		if r.Name == repoName {
+			logger.Info("Repository %s already exists", repoName)
+			http.Error(w, "Repository already monitored", http.StatusConflict)
+			return
+		}
+	}
+
+	// * Sync the new repo
+	if err := h.service.SyncRepository(ctx, req.Owner, req.Name, time.Time{}); err != nil {
+		errors.WriteHTTPError(w, err)
+		return
+	}
+
+	// * Start monitoring
+	go func() {
+		syncInterval, _ := time.ParseDuration(os.Getenv("SYNC_INTERVAL"))
+		w := worker.NewSyncWorker(h.service, syncInterval, req.Owner, req.Name)
+		w.Run(h.ctx)
+	}()
+
+	w.WriteHeader(http.StatusCreated)
+	writeSuccess(w, map[string]string{
+		"message": "Repository successfully added and monitoring started.",
+	}, "Repository added")
 }
 
 // getCommits godoc
@@ -74,7 +150,6 @@ func (h *RepositoryHandler) getCommits(w http.ResponseWriter, r *http.Request) {
 	owner := vars["owner"]
 	repoName := vars["name"]
 
-	// Parse pagination params
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	if page < 1 {
 		page = 1
@@ -84,7 +159,6 @@ func (h *RepositoryHandler) getCommits(w http.ResponseWriter, r *http.Request) {
 		limit = 30
 	}
 
-	// Parse date filters
 	var since, until *time.Time
 	if s := r.URL.Query().Get("since"); s != "" {
 		if t, err := time.Parse(time.RFC3339, s); err == nil {
@@ -100,23 +174,19 @@ func (h *RepositoryHandler) getCommits(w http.ResponseWriter, r *http.Request) {
 	fullName := owner + "/" + repoName
 	commits, err := h.service.GetCommits(r.Context(), fullName, since, until)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		errors.WriteHTTPError(w, err)
 		return
 	}
 
-	// Implement pagination
 	start := (page - 1) * limit
 	if start > len(commits) {
-		json.NewEncoder(w).Encode([]interface{}{})
+		json.NewEncoder(w).Encode([]any{})
 		return
 	}
-	end := start + limit
-	if end > len(commits) {
-		end = len(commits)
-	}
+	end := min(start+limit, len(commits))
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(commits[start:end])
+	logger.Info("Fetched %d commits for %s", end-start, fullName)
+	writeSuccess(w, commits[start:end], "Successfully fetched commits")
 }
 
 // getTopCommitAuthors godoc
@@ -135,7 +205,6 @@ func (h *RepositoryHandler) getTopCommitAuthors(w http.ResponseWriter, r *http.R
 	owner := vars["owner"]
 	repoName := vars["name"]
 
-	// Parse limit parameter
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit < 1 || limit > 100 {
 		limit = 10
@@ -144,16 +213,17 @@ func (h *RepositoryHandler) getTopCommitAuthors(w http.ResponseWriter, r *http.R
 	fullName := owner + "/" + repoName
 	authors, err := h.service.GetTopAuthors(r.Context(), fullName, limit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		errors.WriteHTTPError(w, err)
 		return
 	}
 
 	if authors == nil {
-		authors = []models.AuthorCommitCount{} // Return empty array instead of null
+		authors = []models.AuthorCommitCount{}
 	}
 
+	logger.Info("Fetched top authors for %s", fullName)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(authors)
+	writeSuccess(w, authors, "Successfully fetched top authors")
 }
 
 // resetCollection godoc
@@ -174,27 +244,27 @@ func (h *RepositoryHandler) resetCollection(w http.ResponseWriter, r *http.Reque
 	owner := vars["owner"]
 	repoName := vars["name"]
 
-	// Parse request body
 	var request struct {
 		Since time.Time `json:"since"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		errors.WriteHTTPError(w, err)
 		return
 	}
 
 	fullName := owner + "/" + repoName
 	if err := h.service.ResetRepository(r.Context(), fullName, request.Since); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		errors.WriteHTTPError(w, err)
 		return
 	}
 
+	logger.Info("Reset repository %s data since %s", fullName, request.Since.Format(time.RFC3339))
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
+	writeSuccess(w, map[string]string{
 		"message": "Repository data reset successfully",
 		"since":   request.Since.Format(time.RFC3339),
-	})
+	}, "Repository data reset successfully")
 }
 
 // monitorRepository godoc
@@ -215,24 +285,24 @@ func (h *RepositoryHandler) monitorRepository(w http.ResponseWriter, r *http.Req
 	owner := vars["owner"]
 	repoName := vars["name"]
 
-	// Parse request body
 	var request struct {
 		Since time.Time `json:"since"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		errors.WriteHTTPError(w, err)
 		return
 	}
 
 	if err := h.service.SyncRepository(r.Context(), owner, repoName, request.Since); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		errors.WriteHTTPError(w, err)
 		return
 	}
 
+	logger.Info("Started monitoring repository %s since %s", owner+"/"+repoName, request.Since.Format(time.RFC3339))
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
+	writeSuccess(w, map[string]string{
 		"message": "Repository monitoring started successfully",
 		"since":   request.Since.Format(time.RFC3339),
-	})
+	}, "Repository monitoring started successfully")
 }

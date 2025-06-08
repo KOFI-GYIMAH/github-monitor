@@ -11,6 +11,7 @@ type Database interface {
 	// * Repository operations
 	UpsertRepository(ctx context.Context, repo *Repository) error
 	GetRepository(ctx context.Context, name string) (*Repository, error)
+	GetAllRepositories(ctx context.Context) ([]*Repository, error)
 	UpdateRepository(ctx context.Context, repo *Repository) error
 	ResetRepository(ctx context.Context, repoName string, since time.Time) error
 
